@@ -1,0 +1,103 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ms-foundry-ai-batch"
+version = "0.1.0"
+description = "Azure OpenAI Batch webhooks, reconciliation and observability sample"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+  "requests>=2.32,<3",
+]
+
+[project.optional-dependencies]
+# Azure SDKs are only needed by the adapters and the Functions entry points.
+azure = [
+  "azure-identity>=1.19,<2",
+  "azure-data-tables>=12.6,<13",
+  "azure-storage-queue>=12.12,<13",
+  "azure-keyvault-secrets>=4.9,<5",
+  "azure-monitor-opentelemetry>=1.6,<2",
+]
+functions = [
+  "azure-functions>=1.21,<2",
+]
+dev = [
+  "python-dotenv[cli]>=1.2,<2",
+  "pytest>=9.0.3,<10",
+  "pytest-cov>=6.0,<7",
+  "ruff>=0.8,<1",
+  "mypy>=1.13,<2",
+  "types-requests>=2.32",
+  "bandit[toml]>=1.8,<2",
+  "pip-audit>=2.7,<3",
+  # `make lock`: hashed functions/requirements.lock for the deployed package.
+  "pip-tools>=7.5,<9",
+  "pre-commit>=4,<5",
+  # Only used by the signature conformance test (tests/unit/test_signature_conformance.py).
+  "openai>=1.99,<3",
+]
+
+[project.scripts]
+foundry-batch = "foundry_batch.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+addopts = "-ra --strict-markers"
+markers = [
+  "integration: needs Azurite or a cloud environment (run in the integration stage)",
+]
+
+[tool.coverage.run]
+branch = true
+# The package, the Functions entry points and the pipeline tools are all under the gate (the
+# Azure adapters and function_app.py are unit-tested against SDK stand-ins in tests/stubs).
+source_pkgs = ["foundry_batch"]
+source = ["functions", "tools"]
+omit = ["*/foundry_batch/__main__.py"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = false
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "\\.\\.\\.$",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "N", "C4", "RET", "PTH", "DTZ", "BLE"]
+ignore = ["S101"]  # assert is fine in tests; production code does not rely on assert
+
+[tool.ruff.lint.per-file-ignores]
+# Tests favour readable fixtures over wrapping; the formatter handles the rest.
+"tests/**" = ["S105", "S106", "S311", "DTZ001", "E501", "N802", "N815"]
+# BaseHTTPRequestHandler dispatches through do_GET, do_POST and do_DELETE.
+"src/foundry_batch/emulator/transport.py" = ["N815"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+mypy_path = "src"
+packages = ["foundry_batch"]
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["azure.*", "azure.functions.*", "openai.*"]
+ignore_missing_imports = true
+
+[tool.bandit]
+exclude_dirs = ["tests"]

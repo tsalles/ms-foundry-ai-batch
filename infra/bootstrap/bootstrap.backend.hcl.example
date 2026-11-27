@@ -1,0 +1,7 @@
+# Used once for `terraform init -migrate-state` after the first local apply.
+# Bootstrap state has its own container; the workload pipeline identity has no role on it.
+resource_group_name  = "rg-foundry-batch-poc"
+storage_account_name = "REPLACE-WITH-OUTPUT-state_storage_account_name"
+container_name       = "tfstate-bootstrap"
+key                  = "bootstrap/rg-foundry-batch-poc.tfstate"
+use_azuread_auth     = true

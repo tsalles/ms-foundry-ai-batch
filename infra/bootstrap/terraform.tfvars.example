@@ -1,0 +1,20 @@
+tenant_id       = "00000000-0000-0000-0000-000000000000"
+subscription_id = "00000000-0000-0000-0000-000000000000"
+location        = "eastus2"
+
+tags = {
+  owner       = "REPLACE-owner-alias"
+  cost-center = "REPLACE-cost-center"
+}
+
+# state_contributor_object_ids           = ["<pipeline identity object id>", "<poc lead object id>"]
+# bootstrap_state_contributor_object_ids = ["<poc lead object id>"]   # never the pipeline identity
+# allowed_ip_ranges                      = ["<runner egress ip>/32"]
+
+# Phase 2 (private state, ADR 0010): after the workload root exists, from the private runner.
+# 1) set the two ids and apply (endpoint created, public access still on); check that the state
+#    account's blob host name resolves to a private address from the runner;
+# 2) set state_public_network_access_enabled = false and apply again.
+# state_private_endpoint_subnet_id    = "<workload output private_endpoint_subnet_id>"
+# state_private_dns_zone_id           = "<workload output private_dns_zone_ids.blob>"
+# state_public_network_access_enabled = false

@@ -1,0 +1,11 @@
+{
+  "tenant_id": "00000000-0000-0000-0000-000000000000",
+  "subscription_id": "00000000-0000-0000-0000-000000000000",
+  "resource_group": "rg-foundry-batch-poc",
+  "location": "eastus2",
+  "model_name": "REPLACE-WITH-D-12-MODEL",
+  "model_version": "REPLACE-WITH-D-12-VERSION",
+  "sku_name": "GlobalBatch",
+  "planned_names": [],
+  "deployer_object_id": null
+}

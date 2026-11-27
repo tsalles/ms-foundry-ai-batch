@@ -1,0 +1,64 @@
+# Offline checks: no backend, no cloud credentials (TC-H08).
+parameters:
+  - name: terraformVersion
+    type: string
+    default: "1.17.2"
+  - name: tflintVersion
+    type: string
+    default: "0.66.0"
+  - name: checkovVersion
+    type: string
+    default: "3.4.3"
+  - name: roots
+    type: object
+    default:
+      - infra/bootstrap
+      - infra/envs/poc
+
+steps:
+  - template: terraform-install.yml
+    parameters:
+      terraformVersion: ${{ parameters.terraformVersion }}
+
+  - bash: terraform fmt -check -recursive -diff infra
+    displayName: terraform fmt
+
+  - ${{ each root in parameters.roots }}:
+      - bash: |
+          set -euo pipefail
+          terraform -chdir=${{ root }} init -backend=false -input=false -lockfile=readonly
+          terraform -chdir=${{ root }} validate
+        displayName: validate ${{ root }}
+
+  - bash: terraform -chdir=infra/envs/poc test
+    displayName: terraform test (mocked providers)
+
+  - bash: |
+      set -euo pipefail
+      curl -fsSL "https://github.com/terraform-linters/tflint/releases/download/v${{ parameters.tflintVersion }}/tflint_linux_amd64.zip" -o "$(Agent.TempDirectory)/tflint.zip"
+      unzip -o -q "$(Agent.TempDirectory)/tflint.zip" -d "$(Agent.TempDirectory)/tflint"
+      export PATH="$(Agent.TempDirectory)/tflint:$PATH"
+      # An undefined pipeline variable arrives as the literal macro text; sending that as a
+      # token makes tflint --init fail with 401, so export it only when it is a real value.
+      unset GITHUB_TOKEN
+      if [ -n "${TFLINT_GITHUB_TOKEN:-}" ] && [[ "$TFLINT_GITHUB_TOKEN" != \$\(* ]]; then
+        export GITHUB_TOKEN="$TFLINT_GITHUB_TOKEN"
+      fi
+      tflint --init --config "$(Build.SourcesDirectory)/infra/.tflint.hcl"
+      tflint --config "$(Build.SourcesDirectory)/infra/.tflint.hcl" --chdir infra --recursive
+    displayName: tflint
+    env:
+      TFLINT_GITHUB_TOKEN: $(GITHUB_TOKEN_FOR_TFLINT)   # optional, avoids plugin download rate limits
+
+  - bash: |
+      set -euo pipefail
+      python -m pip install --quiet "checkov==${{ parameters.checkovVersion }}"
+      checkov --config-file infra/.checkov.yaml --output cli --output junitxml --output-file-path console,$(Agent.TempDirectory)/checkov
+    displayName: checkov
+
+  - task: PublishTestResults@2
+    condition: succeededOrFailed()
+    inputs:
+      testResultsFormat: JUnit
+      testResultsFiles: $(Agent.TempDirectory)/checkov/results_junitxml.xml
+      testRunTitle: checkov

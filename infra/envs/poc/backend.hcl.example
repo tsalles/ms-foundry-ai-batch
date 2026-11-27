@@ -1,0 +1,8 @@
+# Copy to backend.hcl (git-ignored) and run: terraform init -backend-config=backend.hcl
+# Workload state container; bootstrap state is in tfstate-bootstrap, where this identity has no role.
+resource_group_name  = "rg-foundry-batch-poc"
+storage_account_name = "REPLACE-WITH-BOOTSTRAP-OUTPUT-state_storage_account_name"
+container_name       = "tfstate"
+key                  = "workload/rg-foundry-batch-poc.tfstate"
+use_azuread_auth     = true
+# In Azure DevOps: also set use_oidc = true (or ARM_USE_OIDC=true in the environment).

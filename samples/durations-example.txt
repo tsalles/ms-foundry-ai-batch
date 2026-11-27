@@ -1,0 +1,9 @@
+# Illustrative job durations in seconds for `foundry-batch simulate`. Replace with real data (Q-H03).
+900
+1800
+3600
+7200
+14400
+28800
+57600
+86400

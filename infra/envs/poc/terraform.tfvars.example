@@ -1,0 +1,39 @@
+# Copy to terraform.tfvars (git-ignored). No secrets belong in this file.
+tenant_id       = "00000000-0000-0000-0000-000000000000"
+subscription_id = "00000000-0000-0000-0000-000000000000"
+location        = "eastus2"
+environment     = "poc"
+
+tags = {
+  owner       = "REPLACE-owner-alias"
+  cost-center = "REPLACE-cost-center"
+}
+
+# Decision D-12 pins model, version and capacity; placeholders are rejected by validation.
+foundry_resources = {
+  eus2 = {
+    deployments = [
+      {
+        name          = "batch-default"
+        model_name    = "REPLACE-WITH-D-12-MODEL"
+        model_version = "REPLACE-WITH-D-12-VERSION"
+        sku_name      = "GlobalBatch"
+        capacity      = 1
+      },
+    ]
+  }
+}
+
+# registration_principal_object_id = "<pipeline identity object id>"
+# operator_principal_object_ids    = ["<operator group or user object id>"]
+# runner_vnet_ids                  = { buildagents = "/subscriptions/.../virtualNetworks/vnet-agents" }
+# alert_email_receivers            = [{ name = "poc-lead", email_address = "<approved address>" }]
+
+# Private networking (ADR 0010). Defaults keep exceptions NX-1 (webhook ingress) and NX-2
+# (portal log queries); everything else is private.
+# function_public_ingress      = true     # false: private-only app, polling-only reconciliation
+# webhook_source_service_tags  = []       # e.g. ["AzureCloud"] once Q-P01 names the source ranges
+# monitor_public_query_enabled = true     # false after TC-H13, with an in-network operator client
+# function_egress_lockdown     = true     # deny internet egress except Entra ID
+# egress_next_hop_ip           = "10.0.0.4"   # landing zone firewall instead of the lockdown
+# existing_private_dns_zone_ids = { blob = "/subscriptions/.../privateDnsZones/privatelink.blob.core.windows.net" }

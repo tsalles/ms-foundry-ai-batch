@@ -1,0 +1,20 @@
+# Checkov configuration. Skips are deliberate exceptions only, each with its reason.
+framework:
+  - terraform
+directory:
+  - infra
+download-external-modules: false
+skip-check:
+  # Storage and Function App are created through azapi (keys out of state, Flex host storage);
+  # Checkov has no policies for azapi bodies or azurerm_function_app_flex_consumption, so their
+  # controls are asserted in infra/envs/poc/tests and reviewed manually (infra/README.md).
+  # Public network access on the Function App is the documented webhook ingress exception NX-1
+  # (function_public_ingress, ADR 0001 and ADR 0010); tools/plan_guard.py rejects any other
+  # public access in the plan.
+  - CKV_AZURE_221   # Function App public network access: webhook ingress exception NX-1
+  # PoC baseline: a single FC1 app that scales to zero, no availability-zone or failover-instance
+  # requirement, and Microsoft-managed keys only (no customer-managed key requirement recorded).
+  # Revisit all three before production.
+  - CKV_AZURE_212   # App Service plan minimum instances: FC1 scales to zero by design
+  - CKV_AZURE_225   # App Service plan zone redundancy: not part of the PoC baseline
+  - CKV2_AZURE_22   # Foundry customer-managed key: Microsoft-managed keys accepted for the PoC

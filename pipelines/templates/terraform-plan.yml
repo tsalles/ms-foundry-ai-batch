@@ -1,0 +1,62 @@
+# Saved plan + guard + secret scan; the plan is published as a restricted pipeline artifact.
+parameters:
+  - name: root
+    type: string
+  - name: backendKey
+    type: string
+  - name: varFile
+    type: string
+  - name: artifactName
+    type: string
+  - name: resourceGroup
+    type: string
+    default: rg-foundry-batch-poc
+  - name: stateContainer
+    type: string
+    default: tfstate   # workload state; bootstrap state is in tfstate-bootstrap
+  - name: allowedLocations
+    type: object
+    default: [eastus2]   # REQ-I08; plan_guard rejects any other region
+  - name: allowDestroy
+    type: boolean
+    default: false
+
+steps:
+  - bash: |
+      set -euo pipefail
+      cat > "$(Agent.TempDirectory)/backend.hcl" <<HCL
+      resource_group_name  = "${{ parameters.resourceGroup }}"
+      storage_account_name = "$(TF_STATE_STORAGE_ACCOUNT)"
+      container_name       = "${{ parameters.stateContainer }}"
+      key                  = "${{ parameters.backendKey }}"
+      use_azuread_auth     = true
+      use_oidc             = true
+      HCL
+      terraform -chdir=${{ parameters.root }} init -input=false -lockfile=readonly -backend-config="$(Agent.TempDirectory)/backend.hcl"
+      terraform -chdir=${{ parameters.root }} plan -input=false -lock-timeout=10m \
+        -var-file="${{ parameters.varFile }}" -out="$(Build.ArtifactStagingDirectory)/tfplan"
+      terraform -chdir=${{ parameters.root }} show -json "$(Build.ArtifactStagingDirectory)/tfplan" > "$(Agent.TempDirectory)/tfplan.json"
+    displayName: terraform plan
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      SYSTEM_OIDCREQUESTURI: $(System.OidcRequestUri)
+
+  - bash: |
+      set -euo pipefail
+      trap 'rm -f "$(Agent.TempDirectory)/tfplan.json"' EXIT
+      # Strict: the plan JSON is one line, so an allowlist marker anywhere must not hide a secret.
+      python tools/secret_scan.py --strict "$(Agent.TempDirectory)/tfplan.json"
+      locations=()
+      for location in ${{ join(' ', parameters.allowedLocations) }}; do
+        locations+=(--allowed-location "$location")
+      done
+      python tools/plan_guard.py "$(Agent.TempDirectory)/tfplan.json" \
+        --resource-group "${{ parameters.resourceGroup }}" --subscription-id "$ARM_SUBSCRIPTION_ID" \
+        "${locations[@]}" ${{ iif(parameters.allowDestroy, '--allow-destroy', '') }}
+    displayName: plan guard and secret scan
+
+  # The saved plan embeds the prior state (every resource attribute, sensitive ones in clear),
+  # so the artifact is as sensitive as state: see "Plan artifacts" in infra/README.md.
+  - publish: $(Build.ArtifactStagingDirectory)/tfplan
+    artifact: ${{ parameters.artifactName }}
+    displayName: publish saved plan

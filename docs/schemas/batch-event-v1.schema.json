@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://batch.example/schemas/batch-event-v1.schema.json",
+  "title": "Batch normalised Azure OpenAI batch event, contract v1",
+  "description": "Metadata only. Never contains prompts, outputs or provider error messages.",
+  "type": "object",
+  "required": ["schema_version", "idempotency_key", "environment", "job_id", "resource_key", "batch_id", "raw_status", "outcome", "timestamps", "request_counts", "source"],
+  "properties": {
+    "schema_version": { "const": "foundry.batch.event.v1" },
+    "idempotency_key": { "type": "string", "description": "Stable per job outcome; shared by webhook, reconciliation and replay paths. Also sent as the webhook-id and Idempotency-Key headers." },
+    "environment": { "type": "string" },
+    "job_id": { "type": "string", "description": "Resource-scoped job id: <resource_key>:<batch_id>" },
+    "resource_key": { "type": "string" },
+    "batch_id": { "type": "string" },
+    "region": { "type": ["string", "null"] },
+    "deployment": { "type": ["string", "null"] },
+    "model": { "type": ["string", "null"] },
+    "correlation_id": { "type": ["string", "null"] },
+    "raw_status": { "type": "string", "description": "Provider status, preserved as received (completed, failed, expired, cancelled)." },
+    "outcome": { "enum": ["completed", "failed", "cancelled"], "description": "failed and expired both map to failed." },
+    "timestamps": {
+      "type": "object",
+      "description": "Provider timestamps in UTC (ISO 8601, microsecond precision); null when the provider did not report them.",
+      "properties": {
+        "created_at": { "type": ["string", "null"] },
+        "in_progress_at": { "type": ["string", "null"] },
+        "finalizing_at": { "type": ["string", "null"] },
+        "completed_at": { "type": ["string", "null"] },
+        "failed_at": { "type": ["string", "null"] },
+        "expired_at": { "type": ["string", "null"] },
+        "cancelling_at": { "type": ["string", "null"] },
+        "cancelled_at": { "type": ["string", "null"] },
+        "terminal_at": { "type": ["string", "null"] }
+      }
+    },
+    "timestamp_provenance": { "const": "provider" },
+    "observed": {
+      "type": "object",
+      "properties": {
+        "terminal_observed_at": { "type": ["string", "null"] },
+        "first_webhook_at": { "type": ["string", "null"] },
+        "emitted_at": { "type": ["string", "null"] }
+      }
+    },
+    "request_counts": {
+      "type": "object",
+      "properties": {
+        "total": { "type": ["integer", "null"] },
+        "completed": { "type": ["integer", "null"] },
+        "failed": { "type": ["integer", "null"] }
+      }
+    },
+    "output_file_id": { "type": ["string", "null"] },
+    "error_file_id": { "type": ["string", "null"] },
+    "source": { "enum": ["webhook", "polling", "replay", "submission"] },
+    "event_id": { "type": ["string", "null"] },
+    "webhook_id": { "type": ["string", "null"] },
+    "details_complete": { "type": "boolean", "description": "False when timestamps/counts are still missing; the reconciler completes them later." },
+    "is_correction": { "type": "boolean" },
+    "correction_of": { "type": ["string", "null"], "description": "Idempotency key of the event this one corrects." }
+  },
+  "additionalProperties": false
+}

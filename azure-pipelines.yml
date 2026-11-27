@@ -1,0 +1,306 @@
+# Batch Batch PoC: CI on every change; plan/apply/deploy/register/smoke on main behind approvals.
+#
+# Required pipeline variables (variable group "foundry-batch-poc", no secrets in it):
+#   AZURE_SERVICE_CONNECTION     name of the workload-identity-federation service connection
+#   AZURE_SERVICE_CONNECTION_ID  its id (Terraform OIDC token refresh)
+#   ARM_CLIENT_ID_VALUE, ARM_TENANT_ID_VALUE, ARM_SUBSCRIPTION_ID_VALUE
+#   TF_STATE_STORAGE_ACCOUNT     bootstrap output state_storage_account_name
+#   PRIVATE_POOL                 agent pool inside (or peered to) the workload VNet; self-hosted
+#                                agents need Python 3.11 in their tool cache
+#   SMOKE_RESOURCE_KEY, SMOKE_DEPLOYMENT
+#   WORKLOAD_TFVARS_SECURE_FILE  name of an approved Azure DevOps Secure File (not source control)
+# Optional secret variable: GITHUB_TOKEN_FOR_TFLINT (TFLint plugin download rate limits).
+# The "foundry-batch-poc" Azure DevOps environment carries the G2 approval check.
+
+trigger:
+  branches:
+    include: [main]
+pr:
+  branches:
+    include: [main]
+
+variables:
+  - group: foundry-batch-poc
+  - name: pythonVersion
+    value: "3.11"
+  - name: terraformVersion
+    value: "1.17.2"
+  # Set to "true" once functions/requirements.lock is committed (`make lock`, infra/README.md):
+  # main builds then fail without the hashed lock instead of only warning.
+  - name: requireDependencyLock
+    value: "false"
+
+stages:
+  - stage: ci
+    displayName: Build and test
+    jobs:
+      - job: python
+        displayName: Lint, type-check, unit tests, coverage
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: $(pythonVersion)
+          - bash: python -m pip install --upgrade pip && pip install -e ".[dev,azure,functions]"
+            displayName: Install
+          - bash: ruff format --check . && ruff check .
+            displayName: Ruff
+          - bash: mypy
+            displayName: Mypy (strict)
+          - bash: bandit -c pyproject.toml -r src -q
+            displayName: Bandit
+          - bash: |
+              set -euo pipefail
+              pip freeze --exclude-editable > "$(Agent.TempDirectory)/audit-requirements.txt"
+              pip-audit --strict --no-deps --disable-pip -r "$(Agent.TempDirectory)/audit-requirements.txt"
+              # What the Function App runs: the hashed lock the package ships (make lock).
+              if [ -f functions/requirements.lock ]; then
+                pip-audit --strict --require-hashes --disable-pip -r functions/requirements.lock
+              else
+                echo "##vso[task.logissue type=warning]functions/requirements.lock is missing: deployed dependencies are not pinned or audited (run make lock)."
+              fi
+            displayName: Dependency audit (CI environment and deployed lock)
+          - bash: pytest -m "not integration" --cov --cov-report=xml --junitxml=test-results-unit.xml
+            displayName: Unit tests (coverage gate 90%)
+          - task: PublishTestResults@2
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFiles: test-results-unit.xml
+              testRunTitle: unit
+          - task: PublishCodeCoverageResults@2
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: coverage.xml
+
+      - job: integration
+        displayName: Azure adapters against Azurite
+        pool:
+          vmImage: ubuntu-latest
+        services:
+          azurite: azurite
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: $(pythonVersion)
+          - bash: pip install -e ".[dev,azure]"
+            displayName: Install
+          - bash: AZURITE=1 pytest -m integration --junitxml=test-results-integration.xml
+            displayName: Integration tests
+          - task: PublishTestResults@2
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFiles: test-results-integration.xml
+              testRunTitle: integration
+
+      - job: terraform
+        displayName: Terraform fmt, validate, test, tflint, checkov
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: $(pythonVersion)
+          - template: pipelines/templates/terraform-validate.yml
+            parameters:
+              terraformVersion: $(terraformVersion)
+
+      - job: secrets
+        displayName: Secret scanning
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+            fetchDepth: "0"
+          - bash: |
+              set -euo pipefail
+              python3 tools/secret_scan.py .
+              docker run --rm -v "$(Build.SourcesDirectory):/repo" zricethezav/gitleaks:v8.21.2 detect --source /repo --redact --no-banner
+            displayName: secret_scan + gitleaks
+
+      - job: package
+        displayName: Function App package
+        dependsOn: [python]
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: $(pythonVersion)
+          - bash: |
+              set -euo pipefail
+              args=()
+              # Deployable (main) packages ship the hashed lock once requireDependencyLock is true;
+              # until then (and on other branches) a missing lock only warns.
+              if [ "$(requireDependencyLock)" = "true" ] && [ "$(Build.SourceBranch)" = "refs/heads/main" ]; then
+                args+=(--require-lock)
+              fi
+              # Local build (ADR 0010): dependencies are installed here, on Linux with the app's
+              # Python version, and shipped in .python_packages. The deployment then skips the
+              # remote build, so the Function App never downloads packages (its subnet denies
+              # internet egress). The hashed lock is used when present; pip enforces its hashes.
+              requirements=functions/requirements.txt
+              if [ -f functions/requirements.lock ]; then requirements=functions/requirements.lock; fi
+              python -m pip install --disable-pip-version-check --no-compile \
+                --target "$(Agent.TempDirectory)/site-packages" -r "$requirements"
+              python tools/build_function_package.py \
+                --output "$(Build.ArtifactStagingDirectory)/functionapp-$(Build.SourceVersion).zip" \
+                --site-packages "$(Agent.TempDirectory)/site-packages" "${args[@]}"
+            displayName: Build deterministic package (dependencies included)
+          - publish: $(Build.ArtifactStagingDirectory)
+            artifact: functionapp
+
+  - stage: plan
+    displayName: Terraform plan (workload)
+    dependsOn: ci
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: plan
+        pool: $(PRIVATE_POOL)
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: $(pythonVersion)
+          - template: pipelines/templates/terraform-install.yml
+            parameters:
+              terraformVersion: $(terraformVersion)
+          - template: pipelines/templates/terraform-env.yml
+            parameters:
+              serviceConnectionId: $(AZURE_SERVICE_CONNECTION_ID)
+              clientId: $(ARM_CLIENT_ID_VALUE)
+              tenantId: $(ARM_TENANT_ID_VALUE)
+              subscriptionId: $(ARM_SUBSCRIPTION_ID_VALUE)
+          - task: DownloadSecureFile@1
+            name: workloadInputs
+            displayName: Download approved workload inputs
+            inputs:
+              secureFile: $(WORKLOAD_TFVARS_SECURE_FILE)
+          - template: pipelines/templates/terraform-plan.yml
+            parameters:
+              root: infra/envs/poc
+              backendKey: workload/rg-foundry-batch-poc.tfstate
+              varFile: $(workloadInputs.secureFilePath)
+              artifactName: tfplan-workload
+
+  - stage: apply
+    displayName: Terraform apply (approval G2)
+    dependsOn: plan
+    jobs:
+      - deployment: apply
+        environment: foundry-batch-poc
+        pool: $(PRIVATE_POOL)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: $(pythonVersion)
+                - template: pipelines/templates/terraform-install.yml
+                  parameters:
+                    terraformVersion: $(terraformVersion)
+                - template: pipelines/templates/terraform-env.yml
+                  parameters:
+                    serviceConnectionId: $(AZURE_SERVICE_CONNECTION_ID)
+                    clientId: $(ARM_CLIENT_ID_VALUE)
+                    tenantId: $(ARM_TENANT_ID_VALUE)
+                    subscriptionId: $(ARM_SUBSCRIPTION_ID_VALUE)
+                - template: pipelines/templates/terraform-apply.yml
+                  parameters:
+                    root: infra/envs/poc
+                    backendKey: workload/rg-foundry-batch-poc.tfstate
+                    artifactName: tfplan-workload
+
+  - stage: deploy
+    displayName: Deploy app, register webhooks, smoke test
+    dependsOn: apply
+    jobs:
+      - deployment: release
+        environment: foundry-batch-poc
+        pool: $(PRIVATE_POOL)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - download: current
+                  artifact: functionapp
+                - download: current
+                  artifact: tf-outputs
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: $(pythonVersion)
+                - bash: |
+                    set -euo pipefail
+                    pip install -e ".[azure]"
+                    # BATCH_ENVIRONMENT comes from the Terraform environment output (Key Vault secret names).
+                    python tools/settings_from_outputs.py "$(Pipeline.Workspace)/tf-outputs/tf-outputs.json" --out "$(Agent.TempDirectory)/settings.json"
+                  displayName: Install CLI and derive settings
+                - task: AzureCLI@2
+                  displayName: Deploy package (OneDeploy, dependencies included)
+                  inputs:
+                    azureSubscription: $(AZURE_SERVICE_CONNECTION)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      app=$(python -c "import json;print(json.load(open('$(Pipeline.Workspace)/tf-outputs/tf-outputs.json'))['function_app_name']['value'])")
+                      # Checked against Microsoft Learn (Nov 2026): config-zip auto-selects Flex package
+                      # deployment (/api/publish, Entra auth, so basic auth can stay off). The request
+                      # goes to the app's private endpoint from this private agent (SCM is not public).
+                      # No remote build: the package already carries its dependencies, installed from
+                      # the hashed lock on the build agent (ADR 0010; the app has no internet egress).
+                      az functionapp deployment source config-zip --resource-group rg-foundry-batch-poc --name "$app" \
+                        --src "$(ls $(Pipeline.Workspace)/functionapp/functionapp-*.zip)" --build-remote false --only-show-errors
+                - task: AzureCLI@2
+                  displayName: Relay secret and webhook registration (US-2.1, US-2.2)
+                  inputs:
+                    azureSubscription: $(AZURE_SERVICE_CONNECTION)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      outputs="$(Pipeline.Workspace)/tf-outputs/tf-outputs.json"
+                      base=$(python -c "import json;print(json.load(open('$outputs'))['webhook_receiver_base_url']['value'])")
+                      keys=$(python -c "import json;print(' '.join(json.load(open('$outputs'))['webhook_receiver_urls']['value']))")
+                      settings="$(Agent.TempDirectory)/settings.json"
+                      foundry-batch --settings "$settings" relay-secret ensure
+                      # Empty when function_public_ingress = false (private-only app, ADR 0010):
+                      # no webhook is registered and reconciliation runs polling-only. Webhooks
+                      # registered before the switch stay active until removed (runbook).
+                      if [ -z "$keys" ]; then
+                        echo "##vso[task.logissue type=warning]Webhook ingress is off (NX-1 disabled): remove webhooks registered earlier with 'foundry-batch register remove' (docs/runbooks/README.md#register-and-rotate)."
+                      fi
+                      for key in $keys; do
+                        foundry-batch --settings "$settings" register ensure --resource "$key" --receiver-base-url "$base"
+                        foundry-batch --settings "$settings" register health --resource "$key"
+                      done
+                - task: AzureCLI@2
+                  displayName: Smoke test (small synthetic job)
+                  inputs:
+                    azureSubscription: $(AZURE_SERVICE_CONNECTION)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -uo pipefail
+                      set -a; eval "$(python -c "import json;[print(f'{k}={json.dumps(v)}') for k,v in json.load(open('$(Agent.TempDirectory)/settings.json')).items()]")"; set +a
+                      # With webhook ingress on, a polling delivery means the webhook path is broken.
+                      source=$(python -c "import json;print('webhook' if json.load(open('$(Pipeline.Workspace)/tf-outputs/tf-outputs.json'))['webhook_ingress_enabled']['value'] else 'polling')")
+                      python tools/smoke_test.py --resource "$(SMOKE_RESOURCE_KEY)" --deployment "$(SMOKE_DEPLOYMENT)" --timeout-minutes 45 --require-source "$source"
+                      code=$?
+                      if [ "$code" -eq 2 ]; then
+                        echo "##vso[task.logissue type=warning]Smoke job not final within 45 minutes; check later with foundry-batch reconcile."
+                        echo "##vso[task.complete result=SucceededWithIssues;]"
+                        exit 0
+                      fi
+                      exit "$code"
+
+resources:
+  containers:
+    - container: azurite
+      image: mcr.microsoft.com/azure-storage/azurite:3.33.0
+      ports:
+        - 10000:10000
+        - 10001:10001
+        - 10002:10002
